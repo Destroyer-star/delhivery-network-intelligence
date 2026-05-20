@@ -25,7 +25,7 @@ The project is broken into four distinct technical phases:
 
 ![ETA Benchmark Charts](https://drive.google.com/drive/folders/1Gk3xvwn6UURjDyp8Hh2T9cwvZrWGIfgN?usp=drive_link)
 
-## 💻 Tech Stack
+## Tech Stack
 * **Graph Theory:** `NetworkX`, `SciPy` (Sparse Matrices)
 * **Machine Learning:** `Scikit-Learn`, `XGBoost`, `LightGBM`
 * **Data Engineering:** `Pandas`, `NumPy`, `Pandera` (Schema Validation)
