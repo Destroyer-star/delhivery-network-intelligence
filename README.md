@@ -21,9 +21,11 @@ The project is broken into four distinct technical phases:
 
 ## Visual Insights
 
-![Hub Bottleneck Analysis](https://drive.google.com/file/d/1YIkC32lDytl7FPGkFdHztYU97FRRYc43/view?usp=sharing)
+### Hub Bottleneck Analysis
+![Hub Bottleneck Analysis](Outputs/Figure/hub_bottleneck_analysis.png)
 
-![ETA Benchmark Charts](https://drive.google.com/file/d/1xE9V4_8KUMZC_QqGRmfO4WnFMav-SXm9/view?usp=sharing)
+### ETA Benchmark Charts
+![ETA Benchmark Charts](Outputs/Figure/eta_benchmark_charts.png)
 
 ## Tech Stack
 * **Graph Theory:** `NetworkX`, `SciPy` (Sparse Matrices)
