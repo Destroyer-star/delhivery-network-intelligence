@@ -19,10 +19,6 @@ from matplotlib.lines import Line2D
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LOGGING
-# ─────────────────────────────────────────────────────────────────────────────
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(message)s",
@@ -32,30 +28,17 @@ logging.basicConfig(
 log = logging.getLogger("bottleneck_audit")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONSTANTS  (single source of truth — Liu et al. §5 thresholds)
-# ─────────────────────────────────────────────────────────────────────────────
-
-# SLA breach definition: actual time > 20% above OSRM estimate (>1.2x)
 SLA_BREACH_RATIO: Final[float] = 1.20
 
-# Chronic delay: corridor median delay > 20% above OSRM
 CHRONIC_DELAY_RATIO: Final[float] = 1.20
 
-# Critical hub threshold (mirrors Liu et al. score > 10 / max_score * 10 logic)
 CRITICAL_HUB_SCORE_PERCENTILE: Final[float] = 0.85
 
-# Normalisation scale (Liu et al. §5.2: each metric normalised 0–10, summed)
 NORM_SCALE: Final[float] = 10.0
 
-# Top-N for chart labels
 TOP_N_LABELS: Final[int] = 5
 TOP_N_CHART: Final[int] = 20
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class AuditConfig:
@@ -67,10 +50,6 @@ class AuditConfig:
     top_n_labels: int   = TOP_N_LABELS
     dpi:          int   = 180
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 1 – LOAD & VALIDATE
-# ─────────────────────────────────────────────────────────────────────────────
 
 REQUIRED_COLS = {
     "trip_uuid", "source_center", "destination_center",
@@ -87,17 +66,7 @@ def load(cfg: AuditConfig) -> pd.DataFrame:
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 2 – CORRIDOR-LEVEL AGGREGATION (edge feature table)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def build_corridor_metrics(df: pd.DataFrame, cfg: AuditConfig) -> pd.DataFrame:
-    """
-    Aggregate trip-level data to OD corridor level.
-
-    Each corridor = directed edge (source_center → destination_center).
-    Metrics align with Liu et al. §5.1 edge-level analysis.
-    """
     log.info("Building corridor-level metrics …")
 
     corridor = (
@@ -109,7 +78,6 @@ def build_corridor_metrics(df: pd.DataFrame, cfg: AuditConfig) -> pd.DataFrame:
             p90_delay_ratio     =("delay_ratio",  lambda x: x.quantile(0.90)),
             std_delay_ratio     =("delay_ratio",  "std"),
             sla_breaches        =("delay_ratio",  lambda x: (x > cfg.sla_threshold).sum()),
-            # Od-level features already engineered in Task 1 – take first (constant per OD)
             od_mean_dist_km     =("od_mean_dist_km",  "first") if "od_mean_dist_km" in df.columns
                                   else ("segment_osrm_distance", "mean"),
             od_reliability      =("od_reliability",   "first") if "od_reliability" in df.columns
@@ -121,7 +89,6 @@ def build_corridor_metrics(df: pd.DataFrame, cfg: AuditConfig) -> pd.DataFrame:
     corridor["breach_rate"]      = corridor["sla_breaches"] / corridor["total_trips"]
     corridor["is_chronic"]       = corridor["median_delay_ratio"] > cfg.chronic_threshold
 
-    # SLA breach contribution share (for ranking corridors by impact)
     total_breaches               = corridor["sla_breaches"].sum()
     corridor["breach_share_pct"] = 100.0 * corridor["sla_breaches"] / max(total_breaches, 1)
 
@@ -134,19 +101,7 @@ def build_corridor_metrics(df: pd.DataFrame, cfg: AuditConfig) -> pd.DataFrame:
     return corridor
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 3 – GRAPH CONSTRUCTION
-# ─────────────────────────────────────────────────────────────────────────────
-
 def build_graph(corridor_df: pd.DataFrame) -> nx.DiGraph:
-    """
-    Construct a directed weighted graph where:
-      nodes  = logistics hubs / distribution centres
-      edges  = OD corridors with delay/volume attributes
-
-    Edge weights = median_delay_ratio (used for betweenness on weighted paths).
-    Mirrors the supplies_to subgraph analysis in Liu et al. §5.
-    """
     log.info("Constructing directed graph …")
     G = nx.DiGraph()
 
@@ -172,33 +127,15 @@ def build_graph(corridor_df: pd.DataFrame) -> nx.DiGraph:
     return G
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 4 – CENTRALITY METRICS  (Liu et al. §5.1)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def compute_centrality(G: nx.DiGraph) -> dict[str, dict]:
-    """
-    Compute the five centrality metrics described in Liu et al. §5.1:
-
-    1. in_degree        – number of inbound corridors (supplier fan-in)
-    2. out_degree       – number of outbound corridors (customer fan-out)
-    3. betweenness      – fraction of shortest paths passing through node
-                          (weighted by delay ratio → delay-aware bottleneck)
-    4. closeness        – inverse mean shortest path length (reachability)
-    5. clustering_coeff – fraction of neighbours that are also connected
-                          (community / interconnectedness measure)
-    """
     log.info("Computing centrality metrics (this may take ~30s for large graphs) …")
     t0 = time.perf_counter()
 
     metrics = {
         "in_degree"    : dict(G.in_degree()),
         "out_degree"   : dict(G.out_degree()),
-        # Weighted betweenness: higher delay ratio = longer effective path
         "betweenness"  : nx.betweenness_centrality(G, weight="weight", normalized=True),
-        # Closeness: use reverse graph for correct directed interpretation
         "closeness"    : nx.closeness_centrality(G),
-        # Clustering on undirected projection (matches Liu et al. triangle-count intent)
         "clustering"   : nx.clustering(G.to_undirected()),
     }
 
@@ -206,12 +143,7 @@ def compute_centrality(G: nx.DiGraph) -> dict[str, dict]:
     return metrics
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 5 – IMPORTANCE SCORING  (Liu et al. §5.2)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _min_max_normalise(series: pd.Series, scale: float = NORM_SCALE) -> pd.Series:
-    """Normalise to [0, scale]. Returns zeroes if all values are identical."""
     rng = series.max() - series.min()
     if rng == 0:
         return pd.Series(0.0, index=series.index)
@@ -224,28 +156,15 @@ def build_node_registry(
     df: pd.DataFrame,
     cfg: AuditConfig,
 ) -> pd.DataFrame:
-    """
-    Build per-hub metrics table and compute the aggregated importance score
-    following Liu et al. §5.2:
-
-        importance = norm(in_degree) + norm(out_degree) + norm(betweenness)
-                   + norm(closeness) + norm(clustering)
-
-    Each metric normalised to [0, 10] before summing → max possible = 50.
-
-    Additionally computes SLA breach counts per hub for operational ranking.
-    """
     log.info("Building hub node registry …")
 
     rows = []
     for node in G.nodes():
-        # Resolve human-readable hub name
         src_match = df.loc[df["source_center"] == node, "source_name"]
         dst_match = df.loc[df["destination_center"] == node, "destination_name"]
         hub_name  = src_match.iat[0] if not src_match.empty else (
                     dst_match.iat[0] if not dst_match.empty else node)
 
-        # Trip-level SLA breaches attributed to this hub (as origin or destination)
         hub_trips  = df[(df["source_center"] == node) | (df["destination_center"] == node)]
         sla_breaches = int((hub_trips["delay_ratio"] > cfg.sla_threshold).sum())
         total_hub_trips = len(hub_trips)
@@ -265,11 +184,9 @@ def build_node_registry(
 
     node_df = pd.DataFrame(rows)
 
-    # Normalise each metric 0–10 (Liu et al. §5.2)
     for metric in ["in_degree", "out_degree", "betweenness", "closeness", "clustering"]:
         node_df[f"{metric}_norm"] = _min_max_normalise(node_df[metric])
 
-    # Aggregated importance score (sum of five normalised metrics, max = 50)
     node_df["importance_score"] = (
         node_df["in_degree_norm"]
         + node_df["out_degree_norm"]
@@ -278,11 +195,9 @@ def build_node_registry(
         + node_df["clustering_norm"]
     )
 
-    # Critical flag: top-15% by importance score
     threshold = node_df["importance_score"].quantile(CRITICAL_HUB_SCORE_PERCENTILE)
     node_df["is_critical"] = node_df["importance_score"] >= threshold
 
-    # SLA-breach contribution share
     total_breaches = node_df["sla_breach_count"].sum()
     node_df["breach_share_pct"] = 100.0 * node_df["sla_breach_count"] / max(total_breaches, 1)
 
@@ -302,23 +217,13 @@ def build_node_registry(
     return node_df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 6 – CORRELATION MATRIX  (Liu et al. Table 3)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def compute_metric_correlation(node_df: pd.DataFrame) -> pd.DataFrame:
-    """Reproduce the centrality correlation matrix of Liu et al. Table 3."""
     cols = ["in_degree", "out_degree", "betweenness", "closeness", "clustering"]
     corr = node_df[cols].corr().round(4)
     log.info("Centrality correlation matrix:\n%s", corr.to_string())
     return corr
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 7 – VISUALISATION
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Palette
 DARK_BG     = "#0f1117"
 CARD_BG     = "#1a1d27"
 ACCENT_BLUE = "#4f8ef7"
@@ -355,13 +260,6 @@ def plot_bottleneck_analysis(
     corr_matrix: pd.DataFrame,
     cfg: AuditConfig,
 ) -> Path:
-    """
-    4-panel figure:
-      A. Top-N hubs by SLA breach contribution (horizontal bar)
-      B. Betweenness vs. SLA breach count scatter (chokepoint quadrant)
-      C. Top-N chronically delayed corridors (horizontal bar)
-      D. Centrality correlation heatmap (Liu et al. Table 3)
-    """
     _apply_base_style()
 
     fig = plt.figure(figsize=(18, 12), facecolor=DARK_BG)
@@ -373,7 +271,6 @@ def plot_bottleneck_analysis(
     ax_c = fig.add_subplot(gs[1, 0])
     ax_d = fig.add_subplot(gs[1, 1])
 
-    # ── Panel A: Top-N hubs by SLA breach count ──────────────────────────────
     top_hubs = node_df.nlargest(cfg.top_n_chart, "sla_breach_count").iloc[::-1]
     bar_colors = [ACCENT_RED if c else ACCENT_BLUE for c in top_hubs["is_critical"]]
     bars = ax_a.barh(top_hubs["hub_name"].str.split("_").str[0],
@@ -393,7 +290,6 @@ def plot_bottleneck_analysis(
     ax_a.legend(handles=legend_elems, loc="lower right", fontsize=7,
                 framealpha=0.15, edgecolor=GRID_COLOR)
 
-    # ── Panel B: Betweenness vs SLA breaches (chokepoint quadrant) ───────────
     sc = ax_b.scatter(
         node_df["betweenness"],
         node_df["sla_breach_count"],
@@ -407,20 +303,17 @@ def plot_bottleneck_analysis(
     cbar.set_label("Importance Score", color=TEXT_MUTED, fontsize=7.5)
     cbar.ax.yaxis.set_tick_params(color=TEXT_MUTED, labelcolor=TEXT_MUTED)
 
-    # Quadrant lines (medians)
     med_bet = node_df["betweenness"].median()
     med_sla = node_df["sla_breach_count"].median()
     ax_b.axvline(med_bet, color=GRID_COLOR, linewidth=1.2, linestyle="--")
     ax_b.axhline(med_sla, color=GRID_COLOR, linewidth=1.2, linestyle="--")
 
-    # Quadrant labels
     x_max, y_max = node_df["betweenness"].max(), node_df["sla_breach_count"].max()
     ax_b.text(x_max * 0.98, y_max * 0.97, "HIGH RISK\nCHOKEPOINT",
               ha="right", va="top", color=ACCENT_RED, fontsize=6.5, fontweight="bold", alpha=0.7)
     ax_b.text(x_max * 0.02, y_max * 0.97, "HIGH BREACH\nLOW CENTRALITY",
               ha="left", va="top", color=ACCENT_GOLD, fontsize=6.5, fontweight="bold", alpha=0.7)
 
-    # Annotate top hubs
     top_annotate = node_df.nlargest(cfg.top_n_labels, "sla_breach_count")
     for _, row in top_annotate.iterrows():
         ax_b.annotate(
@@ -435,7 +328,6 @@ def plot_bottleneck_analysis(
     ax_b.set_ylabel("SLA Breach Count")
     ax_b.grid(True, linestyle="--")
 
-    # ── Panel C: Top-N chronically delayed corridors ──────────────────────────
     chronic = (
         corridor_df[corridor_df["is_chronic"]]
         .nlargest(cfg.top_n_chart, "sla_breaches")
@@ -453,7 +345,6 @@ def plot_bottleneck_analysis(
     ax_c.grid(True, axis="x", linestyle="--")
     ax_c.tick_params(axis="y", labelsize=7)
 
-    # ── Panel D: Centrality correlation heatmap (Liu et al. Table 3) ─────────
     mask  = np.triu(np.ones_like(corr_matrix, dtype=bool), k=1)
     cmap  = LinearSegmentedColormap.from_list("corr", ["#1a3a6b", CARD_BG, "#6b1a1a"])
     sns.heatmap(
@@ -475,13 +366,11 @@ def plot_bottleneck_analysis(
     ax_d.collections[0].colorbar.ax.yaxis.set_tick_params(
         color=TEXT_MUTED, labelcolor=TEXT_MUTED, labelsize=7)
 
-    # ── Figure-level title ───────────────────────────────────────────────────
     fig.suptitle(
         "Logistics Network — Bottleneck & Corridor Audit",
         fontsize=15, fontweight="bold", color=TEXT_MAIN, y=0.97,
     )
 
-    # Caption / data note
     n_critical = node_df["is_critical"].sum()
     n_chronic  = corridor_df["is_chronic"].sum()
     fig.text(
@@ -500,10 +389,6 @@ def plot_bottleneck_analysis(
 
 
 def plot_importance_ranking(node_df: pd.DataFrame, cfg: AuditConfig) -> Path:
-    """
-    Standalone importance score ranking chart (top-N hubs).
-    Stacked bar showing contribution of each normalised metric.
-    """
     _apply_base_style()
 
     top = node_df.nlargest(cfg.top_n_chart, "importance_score").iloc[::-1]
@@ -524,7 +409,6 @@ def plot_importance_ranking(node_df: pd.DataFrame, cfg: AuditConfig) -> Path:
                 height=0.65, linewidth=0, alpha=0.92)
         left += vals
 
-    # Critical marker line
     crit_thresh = node_df[node_df["is_critical"]]["importance_score"].min()
     ax.axvline(crit_thresh, color=ACCENT_RED, linewidth=1.5,
                linestyle="--", label=f"Critical threshold ({crit_thresh:.1f})")
@@ -546,10 +430,6 @@ def plot_importance_ranking(node_df: pd.DataFrame, cfg: AuditConfig) -> Path:
     return path
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 8 – EXPORT AUDIT TABLES
-# ─────────────────────────────────────────────────────────────────────────────
-
 def export_tables(
     node_df: pd.DataFrame,
     corridor_df: pd.DataFrame,
@@ -559,7 +439,6 @@ def export_tables(
     hub_path = cfg.output_dir / "hub_audit_metrics.csv"
     cor_path = cfg.output_dir / "corridor_audit_metrics.csv"
 
-    # Hub table: keep interpretable columns, sort by importance
     hub_export_cols = [
         "node_id", "hub_name",
         "in_degree", "out_degree", "betweenness", "closeness", "clustering",
@@ -571,7 +450,6 @@ def export_tables(
     node_df[hub_export_cols].to_csv(hub_path, index=False)
     log.info("Saved hub audit metrics → %s  (%d hubs)", hub_path, len(node_df))
 
-    # Corridor table: sort chronically delayed first, then by breach count
     corridor_df.sort_values(
         ["is_chronic", "sla_breaches"], ascending=[False, False]
     ).to_csv(cor_path, index=False)
@@ -580,12 +458,7 @@ def export_tables(
     return hub_path, cor_path
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SUMMARY REPORT
-# ─────────────────────────────────────────────────────────────────────────────
-
 def print_summary(node_df: pd.DataFrame, corridor_df: pd.DataFrame, G: nx.DiGraph) -> None:
-    """Log a boardroom-ready text summary of the audit findings."""
     top5_hubs = node_df.nlargest(5, "importance_score")
     top5_cors = corridor_df.nlargest(5, "sla_breaches")
 
@@ -616,10 +489,6 @@ def print_summary(node_df: pd.DataFrame, corridor_df: pd.DataFrame, G: nx.DiGrap
         )
     log.info("=" * 60)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ORCHESTRATOR
-# ─────────────────────────────────────────────────────────────────────────────
 
 def run(cfg: AuditConfig | None = None) -> dict:
     if cfg is None:
@@ -659,13 +528,5 @@ def run(cfg: AuditConfig | None = None) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
-    # In a notebook environment, __name__ is '__main__', but we don't want
-    # argparse to try and parse kernel arguments. Instead, we'll directly call run().
-    # If you intend to run this as a standalone script from the command line
-    # with arguments, you would re-enable the argparse logic.
     run()
